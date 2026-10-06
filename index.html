@@ -98,6 +98,7 @@ table.lt th{background:var(--panel2)}
 .res{display:inline-block;font-size:.72rem;font-weight:800;padding:1px 7px;border-radius:8px;margin-left:4px}
 .res.win,.res.bj{background:#2ecc71;color:#062}.res.lose,.res.bust{background:#ff6b6b;color:#400}.res.push{background:#ddd;color:#333}
 .controls{margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center;align-items:center;min-height:52px}
+.result-card{background:#0b1a12;border:1px solid #f5c45166;border-radius:12px;padding:10px}
 .hud{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .stat{background:var(--panel2);border-radius:10px;padding:8px 10px}
 .stat b{display:block;font-size:1.15rem}
@@ -834,6 +835,26 @@ function renderHUD(){
     $('#countBox').innerHTML=`<div class="small muted">TRAINING WHEELS</div><div class="row" style="justify-content:space-between"><div>Running <b>${fmt(C.running)}</b></div><div>Decks left <b>${decksLeft()}</b></div><div>True <b>${fmt1(tc)}</b></div></div><div class="small">Bet ramp: <b>${rampUnits(tc)} unit(s)</b> = ${money(rampUnits(tc)*C.unit)}${tc>=3?' · <span class="warn">Insurance OK</span>':''}</div>`;
   } else $('#countBox').innerHTML=`<div class="small muted">Count hidden. Keep it in your head! 🧠<br>Turn on "Show count" in settings to check yourself.</div>`;
 }
+function resultExplanation(){
+  const d=hv(C.dealer).total, dBust=d>21;
+  const s=you(), hands=s?s.hands:[];
+  const labels={win:'YOU WIN 🎉',bj:'BLACKJACK! 🂡',lose:'YOU LOSE',bust:'YOU BUST',push:'PUSH — BET RETURNED'};
+  const cls={win:'good',bj:'good',lose:'bad',bust:'bad',push:'warn'};
+  const rows=hands.map((h,i)=>{
+    const t=hv(h.cards).total, label=labels[h.result]||'ROUND RESULT';
+    let why='';
+    if(h.result==='bust') why=`Your hand reached ${t}, which is over 21.`;
+    else if(h.result==='bj') why=`Blackjack pays 3:2, so your ${t} wins automatically unless the dealer also has blackjack.`;
+    else if(h.result==='win') why=dBust?`Dealer busted at ${d}. Your ${t} stays under 21.`:`Your ${t} beats the dealer's ${d}.`;
+    else if(h.result==='lose') why=dBust?`The dealer did not bust, so your hand did not beat ${d}.`:`The dealer's ${d} beats your ${t}.`;
+    else if(h.result==='push') why=`You and the dealer both finished on ${t}. Neither hand wins.`;
+    return `<div class="small" style="margin-top:5px"><b>Hand ${i+1}: ${t>21?'Bust ('+t+')':t}</b> — <span class="${cls[h.result]||''}">${label}</span><br>${why}</div>`;
+  }).join('');
+  return `<div style="width:100%;background:#0005;border:1px solid #ffffff22;border-radius:12px;padding:10px 12px;text-align:left">
+    <div style="font-weight:800;text-align:center;margin-bottom:4px">📚 What happened?</div>
+    <div class="small muted" style="text-align:center">Dealer: <b>${dBust?'Bust ('+d+')':d}</b></div>${rows}
+  </div>`;
+}
 function renderControls(){
   const el=$('#controls');
   if(C.phase==='bet'){
@@ -841,6 +862,10 @@ function renderControls(){
     el.innerHTML=`<div style="width:100%;text-align:center" class="small" ><b>Place your bet</b> (1 unit = ${money(C.unit)} table minimum)</div>${units}
       <button class="btn small" onclick="setBet(C.bet-C.unit)">−</button><button class="btn small" onclick="setBet(C.bet+C.unit)">+</button>
       <button class="btn primary big" onclick="deal()">Deal ${money(C.bet)}<kbd>Enter</kbd></button>`;
+  } else if(C.phase==='result'){
+    el.innerHTML=`${resultExplanation()}
+      <div style="width:100%;text-align:center" class="small muted">Take a moment to compare your hand with the dealer before continuing.</div>
+      <button class="btn primary big" onclick="nextRound()">Next Round ▶<kbd>Enter</kbd></button>`;
   } else if(C.phase==='insurance'){
     el.innerHTML=`<div style="width:100%;text-align:center"><b>Dealer shows an Ace. Insurance?</b> (costs ${money(C.bet/2)})</div><button class="btn green" onclick="resolve('yes')">Yes<kbd>Y</kbd></button><button class="btn" onclick="resolve('no')">No<kbd>N</kbd></button>`;
   } else if(C.phase==='play'&&C.resolver){
@@ -950,19 +975,38 @@ async function settle(){
     if(!s.ai){C.bankroll+=pay;net+=pay-h.bet;P.casino.hands++}
   }
   net-=C.insurance&&!dBJ?C.insurance:0;
+  C.lastNet=net;
+  C.lastDealerTotal=d;
   log(`Round ${C.round}: dealer ${dBJ?'Blackjack':dBust?'busts ('+d+')':d}. You ${net>0?'<span class="good">won '+money(net)+'</span>':net<0?'<span class="bad">lost '+money(-net)+'</span>':'pushed'}.`,net>0?'good':net<0?'bad':'info');
-  save();renderAll();
-  await sleep(C.speed*2.5);
+  save();
+
+  // Beginner-friendly: keep the complete round visible until the learner is ready.
+  C.phase='result';
+  renderAll();
+}
+
+async function nextRound(){
+  if(C.phase!=='result')return;
+
   const due=C.quizEvery>0?C.round%C.quizEvery===0:C.quizEvery<0&&Math.random()<.3;
-  if(due)await countQuiz();
-  // clear table into discard
-  C.dealer=[];for(const s of C.seats)s.hands=[];
-  if(C.shoe.length<=C.cutAt){log('✂️ The cut card came out, so the dealer shuffles.');newShoe()}
+
+  // Clear the completed hand only after the learner has seen the result.
+  C.dealer=[];
+  for(const s of C.seats)s.hands=[];
+  C.active=null;
+
+  if(C.shoe.length<=C.cutAt){
+    log('✂️ The cut card came out, so the dealer shuffles.');
+    newShoe();
+  }
+
   const nd=C.decks!==+$('#csDecks').value||C.ai!==+$('#csAI').value||C.pen!==+$('#csPen').value;
   C.phase='bet';
   if(nd){readSettings();buildSeats();newShoe()}
   if(C.bet>C.bankroll)C.bet=Math.max(C.unit,Math.floor(C.bankroll/C.unit)*C.unit);
   renderAll();
+
+  if(due)await countQuiz();
 }
 function countQuiz(){
   return new Promise(res=>{
@@ -998,6 +1042,7 @@ document.addEventListener('keydown',e=>{
   if(curTab==='casino'){
     if(C.phase==='play'&&'hsdp'.includes(k)&&k.length===1){resolve(k.toUpperCase());e.preventDefault()}
     else if(C.phase==='insurance'&&(k==='y'||k==='n'))resolve(k==='y'?'yes':'no');
+    else if(C.phase==='result'&&k==='enter'){e.preventDefault();nextRound()}
     else if(C.phase==='bet'&&k==='enter'){e.preventDefault();deal()}
   } else if(curTab==='strategy'){
     if(k==='enter'&&ST.answered){e.preventDefault();stNew()}else if('hsdp'.includes(k)&&k.length===1)stAnswer(k.toUpperCase());
